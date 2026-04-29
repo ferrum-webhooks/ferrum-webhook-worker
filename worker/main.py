@@ -54,6 +54,9 @@ def process_event(event_data: dict):
         if not event:
             logger.error(f"Event not found: {event_id}")
             return
+        
+        event.status = "processing"
+        db.commit()
 
         # Fetch matching webhooks
         webhooks = db.query(models.Webhook).filter(
@@ -62,9 +65,18 @@ def process_event(event_data: dict):
 
         logger.info(f"Found {len(webhooks)} webhooks")
 
-        for webhook in webhooks:
-            deliver_event(db, event, webhook)
+        all_success = True
 
+        for webhook in webhooks:
+            success = deliver_event(db, event, webhook)
+            if not success:
+                all_success = False
+        event.status = "delivered" if all_success else "failed"
+        db.commit()
+    except Exception as e:
+        logger.error(f"Error processing event: {e}")
+        event.status = "failed"
+        db.commit()
     finally:
         db.close()
 
@@ -80,10 +92,12 @@ def deliver_event(db, event, webhook):
 
         latency = int((time.time() - start) * 1000)
 
+        success = response.status_code < 400
+
         delivery = models.Delivery(
             event_id=event.id,
             webhook_id=webhook.id,
-            status="success" if response.status_code < 400 else "failed",
+            status="success" if success else "failed",
             response_code=response.status_code,
             latency_ms=latency
         )
@@ -92,9 +106,19 @@ def deliver_event(db, event, webhook):
         db.commit()
 
         logger.info(f"Delivered to {webhook.url} [{response.status_code}]")
-
+        return success
     except Exception as e:
         logger.error(f"Delivery failed: {webhook.url} - {e}")
-
+        delivery = models.Delivery(
+            event_id=event.id,
+            webhook_id=webhook.id,
+            status="failed",
+            response_code=None,
+            latency_ms=None
+        )
+        db.add(delivery)
+        db.commit()
+        return False
+    
 if __name__ == "__main__":
     consume()
