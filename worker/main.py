@@ -79,8 +79,9 @@ def process_event(event_data: dict):
         db.commit()
     except Exception as e:
         logger.error(f"Error processing event: {e}")
-        event.status = "failed"
-        db.commit()
+        if event:
+            event.status = "failed"
+            db.commit()
     finally:
         db.close()
 
