@@ -31,7 +31,11 @@ def consume():
 
     while True:
         try:
-            _, data = redis_client.brpop(QUEUE_NAME)
+            result = redis_client.brpop(QUEUE_NAME)
+            if not result:
+                continue
+
+            _, data = result
             event_data = json.loads(data)
 
             logger.info(f"Received event: {event_data}")
