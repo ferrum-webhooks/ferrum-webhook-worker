@@ -17,27 +17,9 @@ This service marks the transition from a synchronous system to an **event-driven
 
 ## Architecture Context
 
-Ferrum is now composed of two services:
-
-### 1. Gateway (`webhook-gateway`)
-
-* Accepts API requests
-* Stores events in database
-* Pushes events to queue
-
-### 2. Worker (`webhook-worker`) ← *this repo*
-
-* Consumes events from queue
-* Fetches event + webhook data from DB
-* Delivers webhook via HTTP POST
-* Stores delivery result
-
----
-
-## System Flow
-
+```
 Client → Gateway → PostgreSQL → Redis Queue → Worker → Webhook Endpoint
-
+```
 ---
 
 ## Responsibilities
@@ -101,46 +83,25 @@ cd webhook-worker
 
 ---
 
-### 2. Create virtual environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
----
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
----
-
-### 4. Configure environment
-
-Ensure:
-
-* PostgreSQL is running
-* Redis is running on:
+### 2. Configure environment
 
 ```text
-localhost:6379
+DB_HOST 
+DB_PORT 
+DB_USER 
+DB_PASSWORD 
+DB_NAME 
+REDIS_HOST 
+REDIS_PORT
 ```
 
 ---
 
-### 5. Run worker
+### 5. Run in Docker
 
 ```bash
-python worker/main.py
-```
-
-Expected output:
-
-```text
-Worker started. Waiting for events...
+docker build -t ferrum-worker .
+docker run ferrum-worker
 ```
 
 ---
@@ -342,8 +303,8 @@ These are intentionally deferred:
 
 ## Status
 
-🚧 Phase 3 — In Progress
-✅ Gateway → Queue → Worker pipeline operational
+🚧 Phase 4 — Containerized
+✅ End-to-end async processing working
 
 ---
 
@@ -355,23 +316,3 @@ These are intentionally deferred:
 * Improve failure resilience
 
 ---
-
-## Summary
-
-The system has successfully transitioned from:
-
-```text
-Synchronous request-response
-```
-
-to:
-
-```text
-Asynchronous event-driven architecture
-```
-
-This forms the foundation for:
-
-* scalability
-* fault tolerance
-* real-world webhook delivery systems
