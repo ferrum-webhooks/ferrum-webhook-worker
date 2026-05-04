@@ -1,30 +1,21 @@
-metrics = {
-    "events_processed": 0,
-    "delivery_success": 0,
-    "delivery_failure": 0,
-    "delivery_latency": [],
-}
+from prometheus_client import Counter, Histogram
 
-def record_event():
-    metrics["events_processed"] += 1
+EVENTS_PROCESSED = Counter(
+    "worker_events_processed_total",
+    "Total events processed"
+)
 
+DELIVERY_SUCCESS = Counter(
+    "worker_delivery_success_total",
+    "Successful deliveries"
+)
 
-def record_success(latency: float):
-    metrics["delivery_success"] += 1
-    metrics["delivery_latency"].append(latency)
+DELIVERY_FAILURE = Counter(
+    "worker_delivery_failure_total",
+    "Failed deliveries"
+)
 
-
-def record_failure():
-    metrics["delivery_failure"] += 1
-
-
-def get_metrics():
-    latencies = metrics["delivery_latency"]
-    avg_latency = sum(latencies) / len(latencies) if latencies else 0
-
-    return {
-        "events_processed": metrics["events_processed"],
-        "delivery_success": metrics["delivery_success"],
-        "delivery_failure": metrics["delivery_failure"],
-        "avg_delivery_latency": round(avg_latency, 4),
-    }
+DELIVERY_LATENCY = Histogram(
+    "worker_delivery_latency_seconds",
+    "Webhook delivery latency"
+)

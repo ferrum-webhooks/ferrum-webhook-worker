@@ -1,5 +1,6 @@
 # file: worker/main.py
 
+from prometheus_client import start_http_server
 import json
 import time
 import redis
@@ -11,8 +12,10 @@ from dotenv import load_dotenv
 
 from app.db import SessionLocal
 from app.logging_config import setup_logging
-from app.metrics import record_event, record_success, record_failure
+from app.metrics import EVENTS_PROCESSED, DELIVERY_SUCCESS, DELIVERY_FAILURE, DELIVERY_LATENCY
 from app import models
+
+start_http_server(8001)
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -55,7 +58,7 @@ def consume():
                     "event_id": event_data.get("event_id"),
                 }
             )
-            record_event()
+            EVENTS_PROCESSED.inc()
             process_event(event_data)
 
         except Exception as e:
@@ -146,9 +149,10 @@ def deliver_event(db, event, webhook, request_id):
             }
         )
         if success:
-            record_success(latency)
+            DELIVERY_SUCCESS.inc()
+            DELIVERY_LATENCY.observe(latency / 1000)
         else:
-            record_failure()
+            DELIVERY_FAILURE.inc()
         return success
     except Exception as e:
         logger.error(
