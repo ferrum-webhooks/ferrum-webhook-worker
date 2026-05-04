@@ -1,6 +1,7 @@
 # file: worker/main.py
 
 from prometheus_client import start_http_server
+from datetime import datetime, timezone
 import json
 import time
 import redis
@@ -12,7 +13,9 @@ from dotenv import load_dotenv
 
 from app.db import SessionLocal
 from app.logging_config import setup_logging
-from app.metrics import EVENTS_PROCESSED, DELIVERY_SUCCESS, DELIVERY_FAILURE, DELIVERY_LATENCY
+from app.metrics import (
+    EVENTS_PROCESSED, DELIVERY_SUCCESS, DELIVERY_FAILURE, DELIVERY_LATENCY, QUEUE_DELAY, END_TO_END_LATENCY
+)
 from app import models
 
 start_http_server(8001)
@@ -76,9 +79,28 @@ def process_event(event_data: dict):
         event = db.query(models.Event).filter(models.Event.id == event_id).first()
 
         if not event:
-            logger.error(f"Event not found: {event_id}")
+            logger.error(
+                "event_not_found",
+                extra={"service": "worker", "event_id": event_id}
+            )
             return
         
+        event_time = event.created_at
+        if event_time.tzinfo is None:
+            event_time = event_time.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        queue_delay = (now - event_time).total_seconds()
+        QUEUE_DELAY.observe(queue_delay)
+        logger.info(
+            "queue_delay_computed",
+            extra={
+                "service": "worker",
+                "request_id": request_id,
+                "event_id": event_id,
+                "queue_delay": round(queue_delay, 4),
+            }
+        )
         event.status = "processing"
         db.commit()
 
@@ -90,7 +112,6 @@ def process_event(event_data: dict):
         all_success = True
 
         for webhook in webhooks:
-            success = deliver_event(db, event, webhook, request_id)
             logger.info(
                 "delivery_attempt",
                 extra={
@@ -100,12 +121,36 @@ def process_event(event_data: dict):
                     "webhook_url": webhook.url,
                 }
             )
+            success = deliver_event(db, event, webhook, request_id)
             if not success:
                 all_success = False
+        
+        end_to_end_latency = (
+            datetime.now(timezone.utc) - event_time
+        ).total_seconds()
+        END_TO_END_LATENCY.observe(end_to_end_latency)
+        logger.info(
+            "end_to_end_latency",
+            extra={
+                "service": "worker",
+                "request_id": request_id,
+                "event_id": event_id,
+                "latency": round(end_to_end_latency, 4),
+            }
+        )
+
         event.status = "delivered" if all_success else "failed"
         db.commit()
     except Exception as e:
-        logger.error(f"Error processing event: {e}")
+        logger.error(
+            "event_processing_error",
+            extra={
+                "service": "worker",
+                "request_id": request_id,
+                "event_id": event_id,
+                "error": str(e),
+            }
+        )
         if event:
             event.status = "failed"
             db.commit()
@@ -122,7 +167,8 @@ def deliver_event(db, event, webhook, request_id):
             timeout=5
         )
 
-        latency = int((time.time() - start) * 1000)
+        latency_ms = int((time.time() - start) * 1000)
+        latency_sec = latency_ms / 1000
 
         success = response.status_code < 400
 
@@ -131,7 +177,7 @@ def deliver_event(db, event, webhook, request_id):
             webhook_id=webhook.id,
             status="success" if success else "failed",
             response_code=response.status_code,
-            latency_ms=latency
+            latency_ms=latency_ms
         )
 
         db.add(delivery)
@@ -145,12 +191,12 @@ def deliver_event(db, event, webhook, request_id):
                 "event_id": event.id,
                 "webhook_url": webhook.url,
                 "status_code": response.status_code,
-                "latency": latency,
+                "latency": latency_ms,
             }
         )
         if success:
             DELIVERY_SUCCESS.inc()
-            DELIVERY_LATENCY.observe(latency / 1000)
+            DELIVERY_LATENCY.observe(latency_sec)
         else:
             DELIVERY_FAILURE.inc()
         return success
@@ -159,12 +205,13 @@ def deliver_event(db, event, webhook, request_id):
             "delivery_error",
             extra={
                 "service": "worker",
-                "request_id": event.request_id,
+                "request_id": request_id,
                 "event_id": event.id,
                 "webhook_url": webhook.url,
                 "error": str(e)
             }
         )
+        DELIVERY_FAILURE.inc()
         delivery = models.Delivery(
             event_id=event.id,
             webhook_id=webhook.id,

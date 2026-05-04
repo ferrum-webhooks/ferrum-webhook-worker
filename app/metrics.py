@@ -19,3 +19,13 @@ DELIVERY_LATENCY = Histogram(
     "worker_delivery_latency_seconds",
     "Webhook delivery latency"
 )
+
+QUEUE_DELAY = Histogram(
+    "worker_queue_delay_seconds",
+    "Time event spent waiting in queue"
+)
+
+END_TO_END_LATENCY = Histogram(
+    "worker_end_to_end_latency_seconds",
+    "Total time from event creation to delivery"
+)

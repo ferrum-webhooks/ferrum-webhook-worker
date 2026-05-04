@@ -28,7 +28,7 @@ class Event(Base):
     payload = Column(JSON)
     status = Column(String, default='pending')
     event_type = Column(String, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 class Delivery(Base):
     __tablename__ = 'deliveries'
@@ -40,5 +40,5 @@ class Delivery(Base):
     retries = Column(Integer, default=0)
     latency_ms = Column(Integer)
     response_code = Column(Integer)
-    attempted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=True)
-    next_retry_at = Column(DateTime, nullable=True)
+    attempted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=True)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
