@@ -1,4 +1,4 @@
-# Ferrum — Webhook Worker Service (Phase 4)
+# Ferrum — Webhook Worker Service (Phase 5)
 
 ## Overview
 
@@ -32,6 +32,7 @@ Client → Gateway → PostgreSQL → Redis Queue → Worker → Webhook Endpoin
 * Send HTTP POST requests
 * Measure latency
 * Store delivery results
+* Emit structured logs and metrics
 
 ### Worker DOES NOT:
 
@@ -40,21 +41,6 @@ Client → Gateway → PostgreSQL → Redis Queue → Worker → Webhook Endpoin
 * Manage webhooks
 * Perform retries (yet)
 * Guarantee exactly-once delivery
-
----
-
-## Project Structure
-
-```text
-webhook-worker/
-  worker/
-    main.py        # Worker loop and processing logic
-  app/
-    db.py          # DB connection and session
-    models.py      # Shared SQLAlchemy models
-  requirements.txt
-  README.md
-```
 
 ---
 
@@ -69,6 +55,8 @@ webhook-worker/
   * sqlalchemy
   * psycopg2-binary
   * requests
+  * prometheus client
+  * python-json-logger
 
 ---
 
@@ -142,9 +130,14 @@ curl -X POST http://127.0.0.1:8000/events \
 ### Step 4 — Observe worker logs
 
 ```text
-Received event: {"event_id": 1}
-Found 1 webhooks
-Delivered to https://webhook.site/... [200]
+{
+  "service": "worker",
+  "event": "delivery_result",
+  "event_id": 1,
+  "request_id": "abc-123",
+  "status_code": 200,
+  "latency": 0.12
+}
 ```
 
 ---
@@ -193,33 +186,85 @@ Each delivery is stored in `deliveries` table:
 
 ## Observability
 
+### Request Correlation
+
+Each event carries:
+```
+request_id
+```
+Flow:
+```
+Gateway → Queue → Worker → Delivery logs
+```
+This enables end-to-end tracing of a single request.
+
 ### Logging
 
-Logs include:
+Structured JSON logs include:
 
-* event consumption
-* webhook count
-* delivery status
-* errors
+* event_received
+* delivery_attempt
+* delivery_result
+* delivery_failed
 
----
-
-### Latency Measurement
-
-Latency is calculated per delivery:
-
-```text
-latency_ms = time_taken_for_http_request
+Fields:
+```
+service, event_id, request_id, latency, status_code, error
 ```
 
----
+### Metrics (Prometheus)
 
+Worker exposes metrics at:
+```
+http://localhost:8001/metrics
+```
+
+### Core Metrics
+* `worker_events_processed_total`
+* `worker_delivery_success_total`
+* `worker_delivery_failure_total`
+* `worker_delivery_latency_seconds`
+
+### Advanced Metrics
+* Queue Delay
+```worker_queue_delay_seconds```
+
+* Measures:
+
+```time between event creation and worker processing```
+
+### End-to-End Latency
+```worker_end_to_end_latency_seconds```
+
+* Measures:
+```
+event creation → webhook delivery completion
+```
+
+
+#### Important Note on Histograms
+
+Metrics expose:
+
+* `_bucket`
+* `_sum`
+* `_count`
+
+To compute averages:
+```
+sum / count
+```
+To compute percentiles:
+```
+histogram_quantile(...)
+```
 ## Failure Handling (Current State)
 
 ### Implemented:
 
 * Exception handling in worker loop
 * Delivery failure logging
+* Metrics for failure tracking
 
 ### Not Implemented (yet):
 
@@ -257,6 +302,9 @@ latency_ms = time_taken_for_http_request
 
 * Worker directly queries DB (acceptable for now)
 
+### No distributed tracing
+* Only `request_id` based tracking exists
+
 ---
 
 ## Design Decisions
@@ -277,7 +325,7 @@ latency_ms = time_taken_for_http_request
 
 ---
 
-## Deliberate Gaps (Phase 4+ Work)
+## Deliberate Gaps (Future Work)
 
 These are intentionally deferred:
 
@@ -288,6 +336,8 @@ These are intentionally deferred:
 * Async HTTP client
 * Queue durability improvements (e.g., RabbitMQ/Kafka)
 * Horizontal worker scaling
+* Distributed Tracing (OpenTelemetry)
+* Alterting and Dashboards (Grafana)
 
 ---
 
@@ -298,12 +348,17 @@ These are intentionally deferred:
 * Asynchronous processing
 * Decoupling of services
 * Queue-based communication
+* Structured logging
+* Metrics instrumentation (Prometheus)
+* Queue delay analysis
+* End-to-end latency tracking
 
 ---
 
 ## Status
 
-🚧 Phase 4 — Containerized
+🚧 Phase 5 — Observability
+✅ Logs + Metrics + Correlation implemented
 ✅ End-to-end async processing working
 
 ---
