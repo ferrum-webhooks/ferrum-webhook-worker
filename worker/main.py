@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from app.db import SessionLocal
 from app.logging_config import setup_logging
+from app.metrics import record_event, record_success, record_failure
 from app import models
 
 setup_logging()
@@ -54,7 +55,7 @@ def consume():
                     "event_id": event_data.get("event_id"),
                 }
             )
-
+            record_event()
             process_event(event_data)
 
         except Exception as e:
@@ -144,6 +145,10 @@ def deliver_event(db, event, webhook, request_id):
                 "latency": latency,
             }
         )
+        if success:
+            record_success(latency)
+        else:
+            record_failure()
         return success
     except Exception as e:
         logger.error(
