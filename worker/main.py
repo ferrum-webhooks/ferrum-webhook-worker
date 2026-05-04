@@ -7,11 +7,16 @@ import requests
 import logging
 import os
 
+from dotenv import load_dotenv
+
 from app.db import SessionLocal
+from app.logging_config import setup_logging
 from app import models
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
@@ -41,7 +46,14 @@ def consume():
             _, data = result
             event_data = json.loads(data)
 
-            logger.info(f"Received event: {event_data}")
+            logger.info(
+                "event_received",
+                extra={
+                    "service": "worker",
+                    "request_id": event_data.get("request_id"),
+                    "event_id": event_data.get("event_id"),
+                }
+            )
 
             process_event(event_data)
 
@@ -54,6 +66,7 @@ def process_event(event_data: dict):
 
     try:
         event_id = event_data["event_id"]
+        request_id = event_data.get("request_id")
 
         # Fetch event
         event = db.query(models.Event).filter(models.Event.id == event_id).first()
@@ -70,12 +83,19 @@ def process_event(event_data: dict):
             models.Webhook.event_type == event.event_type
         ).all()
 
-        logger.info(f"Found {len(webhooks)} webhooks")
-
         all_success = True
 
         for webhook in webhooks:
-            success = deliver_event(db, event, webhook)
+            success = deliver_event(db, event, webhook, request_id)
+            logger.info(
+                "delivery_attempt",
+                extra={
+                    "service": "worker",
+                    "request_id": request_id,
+                    "event_id": event_id,
+                    "webhook_url": webhook.url,
+                }
+            )
             if not success:
                 all_success = False
         event.status = "delivered" if all_success else "failed"
@@ -88,7 +108,7 @@ def process_event(event_data: dict):
     finally:
         db.close()
 
-def deliver_event(db, event, webhook):
+def deliver_event(db, event, webhook, request_id):
     try:
         start = time.time()
 
@@ -113,10 +133,29 @@ def deliver_event(db, event, webhook):
         db.add(delivery)
         db.commit()
 
-        logger.info(f"Delivered to {webhook.url} [{response.status_code}]")
+        logger.info(
+            "delivery_result",
+            extra={
+                "service": "worker",
+                "request_id": request_id,
+                "event_id": event.id,
+                "webhook_url": webhook.url,
+                "status_code": response.status_code,
+                "latency": latency,
+            }
+        )
         return success
     except Exception as e:
-        logger.error(f"Delivery failed: {webhook.url} - {e}")
+        logger.error(
+            "delivery_error",
+            extra={
+                "service": "worker",
+                "request_id": event.request_id,
+                "event_id": event.id,
+                "webhook_url": webhook.url,
+                "error": str(e)
+            }
+        )
         delivery = models.Delivery(
             event_id=event.id,
             webhook_id=webhook.id,
