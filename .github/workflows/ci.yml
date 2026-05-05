@@ -42,18 +42,18 @@ jobs:
 
     - name: Tag image
       run: |
-            docker tag ferrum-worker:${{ github.sha }} ghcr.io/${{ github.repository }}/worker:${{ github.sha }}
+            docker tag ferrum-worker:${{ github.sha }} ghcr.io/${{ github.repository_owner }}/worker:${{ github.sha }}
 
     - name: Push image
       run: |
-        docker push ghcr.io/${{ github.repository }}/worker:${{ github.sha }}
+        docker push ghcr.io/${{ github.repository_owner }}/worker:${{ github.sha }}
 
     - name: Tag latest
       if: github.ref == 'refs/heads/main'
       run: |
-        docker tag ferrum-worker:${{ github.sha }} ghcr.io/${{ github.repository }}/worker:latest
+        docker tag ferrum-worker:${{ github.sha }} ghcr.io/${{ github.repository_owner }}/worker:latest
         
     - name: Push latest
       if: github.ref == 'refs/heads/main'
       run: |
-        docker push ghcr.io/${{ github.repository }}/worker:latest
+        docker push ghcr.io/${{ github.repository_owner }}/worker:latest
