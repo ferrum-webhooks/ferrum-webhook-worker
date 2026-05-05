@@ -18,14 +18,14 @@ from app.metrics import (
 )
 from app import models
 
+setup_logging()
+logger = logging.getLogger(__name__)
+
 try:
     start_http_server(8001)
     logger.info("Metrics server started on port 8001")
 except OSError:
     logger.warning("Metrics server already running on port 8001")
-
-setup_logging()
-logger = logging.getLogger(__name__)
 
 load_dotenv()
 
