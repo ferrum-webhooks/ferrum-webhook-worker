@@ -57,6 +57,7 @@ Client → Gateway → PostgreSQL → Redis Queue → Worker → Webhook Endpoin
   * requests
   * prometheus client
   * python-json-logger
+  * pytest
 
 ---
 
@@ -258,6 +259,49 @@ To compute percentiles:
 ```
 histogram_quantile(...)
 ```
+---
+
+## CI/CD (GitHub Actions)
+
+---
+
+The worker service uses GitHub Actions for automated builds.
+
+### Pipeline Steps
+
+On every push:
+
+1. Install dependencies
+2. Run tests
+3. Build Docker image
+4. Tag image:
+   - commit SHA
+   - `latest`
+5. Push to GHCR
+
+---
+
+### Image Naming
+```
+ghcr.io/ferrum-webhooks/worker:<tag>
+```
+
+---
+
+### Key Outcome
+
+Worker runs from **registry images**, not local code.
+
+---
+
+### Current Gaps
+
+* Minimal test coverage
+* No retry/failure simulation tests
+* No deployment automation
+
+---
+
 ## Failure Handling (Current State)
 
 ### Implemented:
@@ -357,9 +401,9 @@ These are intentionally deferred:
 
 ## Status
 
-🚧 Phase 5 — Observability
-✅ Logs + Metrics + Correlation implemented
-✅ End-to-end async processing working
+🚧 Phase 6 — CI/CD Enabled  
+✅ Worker image built and versioned  
+✅ Registry-based execution enabled  
 
 ---
 
