@@ -42,3 +42,5 @@ class Delivery(Base):
     response_code = Column(Integer)
     attempted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=True)
     next_retry_at = Column(DateTime(timezone=True), nullable=True)
+    error_message = Column(String, nullable=True)
+    moved_to_dlq = Column(Integer, default=0)

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from app.db import SessionLocal
 from app.logging_config import setup_logging
 from app.metrics import (
-    EVENTS_PROCESSED, DELIVERY_SUCCESS, DELIVERY_FAILURE, DELIVERY_LATENCY, QUEUE_DELAY, END_TO_END_LATENCY
+    EVENTS_PROCESSED, DELIVERY_SUCCESS, DELIVERY_FAILURE, DELIVERY_LATENCY, QUEUE_DELAY, END_TO_END_LATENCY, RETRY_ATTEMPTS, DLQ_EVENTS
 )
 from app import models
 
@@ -39,7 +39,10 @@ redis_client = redis.Redis(
 )
 
 QUEUE_NAME = "event_queue"
+DLQ_NAME = "event_dlq"
 
+MAX_RETRIES = 3
+RETRY_DELAYS = [5, 15, 30]
 
 def get_db():
     return SessionLocal()
@@ -162,70 +165,127 @@ def process_event(event_data: dict):
         db.close()
 
 def deliver_event(db, event, webhook, request_id):
-    try:
-        start = time.time()
+    retry_count = 0
+    while retry_count <= MAX_RETRIES:
+        try:
+            logger.info(
+                "delivery_attempt",
+                extra={
+                    "service": "worker",
+                    "request_id": request_id,
+                    "event_id": event.id,
+                    "retry_count": retry_count,
+                }
+            )
+            start = time.time()
 
-        response = requests.post(
-            webhook.url,
-            json=event.payload,
-            timeout=5
-        )
+            response = requests.post(
+                webhook.url,
+                json=event.payload,
+                timeout=5
+            )
 
-        latency_ms = int((time.time() - start) * 1000)
-        latency_sec = latency_ms / 1000
+            latency_ms = int((time.time() - start) * 1000)
+            latency_sec = latency_ms / 1000
 
-        success = response.status_code < 400
+            success = response.status_code < 400
 
-        delivery = models.Delivery(
-            event_id=event.id,
-            webhook_id=webhook.id,
-            status="success" if success else "failed",
-            response_code=response.status_code,
-            latency_ms=latency_ms
-        )
+            delivery = models.Delivery(
+                event_id=event.id,
+                webhook_id=webhook.id,
+                status="success" if success else "failed",
+                retries=retry_count,
+                response_code=response.status_code,
+                latency_ms=latency_ms
+            )
 
-        db.add(delivery)
-        db.commit()
+            db.add(delivery)
+            db.commit()
 
-        logger.info(
-            "delivery_result",
-            extra={
-                "service": "worker",
-                "request_id": request_id,
-                "event_id": event.id,
-                "webhook_url": webhook.url,
-                "status_code": response.status_code,
-                "latency": latency_ms,
-            }
-        )
-        if success:
-            DELIVERY_SUCCESS.inc()
-            DELIVERY_LATENCY.observe(latency_sec)
-        else:
+            logger.info(
+                "delivery_result",
+                extra={
+                    "service": "worker",
+                    "request_id": request_id,
+                    "event_id": event.id,
+                    "webhook_url": webhook.url,
+                    "status_code": response.status_code,
+                    "retry_count": retry_count,
+                    "latency": latency_ms,
+                }
+            )
+            if success:
+                DELIVERY_SUCCESS.inc()
+                DELIVERY_LATENCY.observe(latency_sec)
+                return True
+            
+            raise Exception(f"HTTP {response.status_code}")
+        except Exception as e:
             DELIVERY_FAILURE.inc()
-        return success
-    except Exception as e:
-        logger.error(
-            "delivery_error",
-            extra={
-                "service": "worker",
-                "request_id": request_id,
-                "event_id": event.id,
-                "webhook_url": webhook.url,
-                "error": str(e)
-            }
-        )
-        DELIVERY_FAILURE.inc()
-        delivery = models.Delivery(
-            event_id=event.id,
-            webhook_id=webhook.id,
-            status="failed",
-            response_code=None,
-            latency_ms=None
-        )
-        db.add(delivery)
-        db.commit()
-        return False
+            logger.error(
+                "delivery_error",
+                extra={
+                    "service": "worker",
+                    "request_id": request_id,
+                    "event_id": event.id,
+                    "webhook_url": webhook.url,
+                    "retry_count": retry_count,
+                    "error": str(e)
+                }
+            )
+            delivery = models.Delivery(
+                event_id=event.id,
+                webhook_id=webhook.id,
+                status="failed",
+                retries=retry_count,
+                response_code=None,
+                latency_ms=None,
+                error_message=str(e)
+            )
+            db.add(delivery)
+            db.commit()
+
+            if retry_count < MAX_RETRIES:
+                RETRY_ATTEMPTS.inc()
+                delay = RETRY_DELAYS[retry_count]
+                logger.info(
+                    "scheduling_retry",
+                    extra={
+                        "service": "worker",
+                        "request_id": request_id,
+                        "event_id": event.id,
+                        "retry_count": retry_count + 1,
+                        "delay": delay
+                    }
+                )
+                time.sleep(delay)
+                retry_count += 1
+                continue
+            logger.critical(
+                "moved_to_dlq",
+                extra={
+                    "service": "worker",
+                    "event_id": event.id,
+                }
+            )
+            DLQ_EVENTS.inc()
+
+            redis_client.lpush(DLQ_NAME, json.dumps(event.payload))
+
+            failed_delivery = models.Delivery(
+                event_id=event.id,
+                webhook_id=webhook.id,
+                status="failed",
+                retries=retry_count,
+                response_code=None,
+                latency_ms=None,
+                error_message=f"Moved to DLQ after {retry_count} attempts"
+            )
+            db.add(failed_delivery)
+            db.commit()
+            event.status = "dead_letter"
+
+            return False
     
 if __name__ == "__main__":
     consume()

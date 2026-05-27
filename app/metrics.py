@@ -29,3 +29,13 @@ END_TO_END_LATENCY = Histogram(
     "worker_end_to_end_latency_seconds",
     "Total time from event creation to delivery"
 )
+
+RETRY_ATTEMPTS = Counter(
+    "worker_retry_attempts_total",
+    "Total retry attempts"
+)
+
+DLQ_EVENTS = Counter(
+    "worker_dlq_events_total",
+    "Events moved to dead letter queue"
+)
