@@ -270,12 +270,37 @@ def deliver_event(db, event, webhook, request_id):
             )
             DLQ_EVENTS.inc()
 
-            redis_client.lpush(DLQ_NAME, json.dumps(event.payload))
+            try:
+                dlq_payload = {
+                    "event_id": event.id,
+                    "payload": event.payload,
+                    "event_type": event.event_type
+                }
+
+                redis_client.lpush(DLQ_NAME, json.dumps(dlq_payload))
+                logger.info(
+                    "dlq_push_success",
+                    extra={
+                        "service": "worker",
+                        "request_id": request_id,
+                        "event_id": event.id,
+                    }
+                )
+            except Exception as e:
+                logger.error(
+                    "dlq_push_error",
+                    extra={
+                        "service": "worker",
+                        "request_id": request_id,
+                        "event_id": event.id,
+                        "error": str(e)
+                    }
+                )
 
             failed_delivery = models.Delivery(
                 event_id=event.id,
                 webhook_id=webhook.id,
-                status="failed",
+                status="dead_letter",
                 retries=MAX_RETRIES,
                 response_code=None,
                 latency_ms=None,
