@@ -166,7 +166,7 @@ def process_event(event_data: dict):
 
 def deliver_event(db, event, webhook, request_id):
     retry_count = 0
-    while retry_count <= MAX_RETRIES:
+    while True:
         try:
             logger.info(
                 "delivery_attempt",
@@ -245,7 +245,7 @@ def deliver_event(db, event, webhook, request_id):
             db.add(delivery)
             db.commit()
 
-            if retry_count < MAX_RETRIES:
+            if retry_count < MAX_RETRIES - 1:
                 RETRY_ATTEMPTS.inc()
                 delay = RETRY_DELAYS[retry_count]
                 logger.info(
@@ -276,7 +276,7 @@ def deliver_event(db, event, webhook, request_id):
                 event_id=event.id,
                 webhook_id=webhook.id,
                 status="failed",
-                retries=retry_count,
+                retries=MAX_RETRIES,
                 response_code=None,
                 latency_ms=None,
                 error_message=f"Moved to DLQ after {retry_count} attempts"
