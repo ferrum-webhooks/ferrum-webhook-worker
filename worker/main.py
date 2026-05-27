@@ -8,6 +8,8 @@ import redis
 import requests
 import logging
 import os
+import signal
+import threading
 
 from dotenv import load_dotenv
 
@@ -44,14 +46,24 @@ DLQ_NAME = "event_dlq"
 MAX_RETRIES = 3
 RETRY_DELAYS = [5, 15, 30]
 
+shutdown_event = threading.Event()
+
 def get_db():
     return SessionLocal()
+
+def handle_shutdown(signum, frame):
+    logger.warning(
+        "shutdown_signal_received",
+        extra={"service": "worker"}
+    )
+
+    shutdown_event.set()
 
 
 def consume():
     logger.info("Worker started. Waiting for events...")
 
-    while True:
+    while not shutdown_event.is_set():
         try:
             result = redis_client.brpop(QUEUE_NAME)
             if not result:
@@ -70,6 +82,11 @@ def consume():
             )
             EVENTS_PROCESSED.inc()
             process_event(event_data)
+
+            logger.warning(
+                "worker_shutdown_complete",
+                extra={"service": "worker"}
+            )
 
         except Exception as e:
             logger.error(f"Worker loop error: {e}")
@@ -312,5 +329,8 @@ def deliver_event(db, event, webhook, request_id):
 
             return False
     
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
+
 if __name__ == "__main__":
     consume()
