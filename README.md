@@ -1,4 +1,4 @@
-# Ferrum — Webhook Worker Service (Phase 6)
+# Ferrum — Webhook Worker Service 
 
 ## Overview
 
