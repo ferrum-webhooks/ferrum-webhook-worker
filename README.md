@@ -1,7 +1,7 @@
 # ferrum-webhook-worker
 
 The delivery engine of **Ferrum**, a service that delivers webhooks reliably. It takes saved events, sends them to the receivers, retries failures, parks the ones that never work, and recovers if it crashes.
-The API that receives events is [`ferrum-webhook-gateway`](https://github.com/pratishtha-abrol/ferrum-webhook-gateway).
+The API that receives events is [`ferrum-webhook-gateway`](https://github.com/ferrum-webhooks/ferrum-webhook-gateway).
 
 ```mermaid
 flowchart LR
@@ -21,7 +21,7 @@ flowchart LR
 - **Shutting down is safe:** the worker finishes the deliveries it has started first.
 - One worker process delivers roughly 320 to 350 messages per second; run more copies for more.
 
-How it recovers from every kind of crash: [engineering note 02](https://github.com/pratishtha-abrol/ferrum/blob/main/docs/engineering/02-delivery-pipeline.md).
+How it recovers from every kind of crash: [engineering note 02](https://github.com/ferrum-webhooks/docs/blob/main/engineering/02-delivery-pipeline.md).
 
 ## Run it
 
@@ -30,7 +30,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env            # database and Redis settings
 .venv/bin/python -m worker.main
 ```
-Easiest full setup: `infra/local/stack.sh up` in the [`infra`](https://github.com/pratishtha-abrol/infra) repository. All settings (retry count, timings, concurrency): [configuration](https://github.com/pratishtha-abrol/ferrum/blob/main/docs/configuration.md).
+Easiest full setup: `infra/local/stack.sh up` in the [`infra`](https://github.com/ferrum-webhooks/infra) repository. All settings (retry count, timings, concurrency): [configuration](https://github.com/ferrum-webhooks/docs/blob/main/configuration.md).
 
 ## Tests
 
