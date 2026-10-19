@@ -1,336 +1,101 @@
 # file: worker/main.py
+#
+# Entry point. Threads: consumer (stream -> deliveries), outbox relay (Postgres -> stream),
+# retry scheduler (due retries -> outbox), health/metrics server.
+#
+# Graceful shutdown: SIGTERM sets `shutdown`; every loop finishes its current unit of work and
+# exits; the consumer finishes (and acks) in-flight deliveries first. No new work is claimed.
 
-from prometheus_client import start_http_server
-from datetime import datetime, timezone
-import json
-import time
-import redis
-import requests
 import logging
-import os
 import signal
 import threading
 
 from dotenv import load_dotenv
 
-from app.db import SessionLocal
-from app.logging_config import setup_logging
-from app.metrics import (
-    EVENTS_PROCESSED, DELIVERY_SUCCESS, DELIVERY_FAILURE, DELIVERY_LATENCY, QUEUE_DELAY, END_TO_END_LATENCY, RETRY_ATTEMPTS, DLQ_EVENTS
-)
-from app import models
+load_dotenv()
 
+from app.db import dispose_engine, get_session_local  # noqa: E402
+from app.logging_config import setup_logging  # noqa: E402
+from app.tracing import setup_tracing  # noqa: E402
+from worker import config  # noqa: E402
+from worker.consumer import consume_loop  # noqa: E402
+from worker.health import Health, start_server  # noqa: E402
+from worker.relay import purge_published, relay_once  # noqa: E402
+from worker.scheduler import recover_orphaned, recover_stale_pending, schedule_due_retries  # noqa: E402
+
+setup_tracing("ferrum-worker")
 setup_logging()
 logger = logging.getLogger(__name__)
 
-try:
-    start_http_server(8001)
-    logger.info("Metrics server started on port 8001")
-except OSError:
-    logger.warning("Metrics server already running on port 8001")
-
-load_dotenv()
-
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    db=0,
-    decode_responses=True
-)
-
-QUEUE_NAME = "event_queue"
-DLQ_NAME = "event_dlq"
-
-MAX_RETRIES = 3
-RETRY_DELAYS = [5, 15, 30]
-
 shutdown_event = threading.Event()
 
-def get_db():
-    return SessionLocal()
 
 def handle_shutdown(signum, frame):
-    logger.warning(
-        "shutdown_signal_received",
-        extra={"service": "worker"}
-    )
-
+    logger.warning("shutdown_signal_received", extra={"service": "worker", "signal": signum})
     shutdown_event.set()
 
 
-def consume():
-    logger.info("Worker started. Waiting for events...")
-
-    while not shutdown_event.is_set():
+def _periodic(name, fn, interval, shutdown, heartbeat):
+    while not shutdown.is_set():
+        heartbeat()
         try:
-            result = redis_client.brpop(QUEUE_NAME)
-            if not result:
-                continue
-
-            _, data = result
-            event_data = json.loads(data)
-
-            logger.info(
-                "event_received",
-                extra={
-                    "service": "worker",
-                    "request_id": event_data.get("request_id"),
-                    "event_id": event_data.get("event_id"),
-                }
-            )
-            EVENTS_PROCESSED.inc()
-            process_event(event_data)
-
-            logger.warning(
-                "worker_shutdown_complete",
-                extra={"service": "worker"}
-            )
-
+            fn()
         except Exception as e:
-            logger.error(f"Worker loop error: {e}")
-            time.sleep(1)
+            logger.error(f"{name}_error", extra={"service": "worker", "error": str(e)})
+            shutdown.wait(1)
+        shutdown.wait(interval)
 
-def process_event(event_data: dict):
-    db = get_db()
+
+def run(shutdown: threading.Event = shutdown_event):
+    session_factory = get_session_local()
+    r = config.make_redis()
+    health = Health(session_factory, r, shutdown)
+    server = start_server(health)
+
+    def relay_tick():
+        # drain fully before sleeping so bursts don't wait a poll interval per batch
+        while not shutdown.is_set() and relay_once(session_factory, r) >= config.RELAY_BATCH:
+            pass
+
+    last_purge = {"t": 0.0}
+
+    def sweep_tick():
+        import time
+        schedule_due_retries(session_factory)
+        recover_orphaned(session_factory)
+        recover_stale_pending(session_factory)
+        if time.monotonic() - last_purge["t"] > 300:
+            last_purge["t"] = time.monotonic()
+            purge_published(session_factory)
+
+    threads = [
+        threading.Thread(target=_periodic, name="relay", daemon=True,
+                         args=("relay", relay_tick, config.RELAY_INTERVAL_SECONDS, shutdown,
+                               health.beater("relay"))),
+        threading.Thread(target=_periodic, name="scheduler", daemon=True,
+                         args=("scheduler", sweep_tick, config.SCHEDULER_INTERVAL_SECONDS, shutdown,
+                               health.beater("scheduler"))),
+    ]
+    for t in threads:
+        t.start()
 
     try:
-        event_id = event_data["event_id"]
-        request_id = event_data.get("request_id")
-
-        # Fetch event
-        event = db.query(models.Event).filter(models.Event.id == event_id).first()
-
-        if not event:
-            logger.error(
-                "event_not_found",
-                extra={"service": "worker", "event_id": event_id}
-            )
-            return
-        
-        event_time = event.created_at
-        if event_time.tzinfo is None:
-            event_time = event_time.replace(tzinfo=timezone.utc)
-
-        now = datetime.now(timezone.utc)
-        queue_delay = (now - event_time).total_seconds()
-        QUEUE_DELAY.observe(queue_delay)
-        logger.info(
-            "queue_delay_computed",
-            extra={
-                "service": "worker",
-                "request_id": request_id,
-                "event_id": event_id,
-                "queue_delay": round(queue_delay, 4),
-            }
-        )
-        event.status = "processing"
-        db.commit()
-
-        # Fetch matching webhooks
-        webhooks = db.query(models.Webhook).filter(
-            models.Webhook.event_type == event.event_type
-        ).all()
-
-        all_success = True
-
-        for webhook in webhooks:
-            logger.info(
-                "delivery_attempt",
-                extra={
-                    "service": "worker",
-                    "request_id": request_id,
-                    "event_id": event_id,
-                    "webhook_url": webhook.url,
-                }
-            )
-            success = deliver_event(db, event, webhook, request_id)
-            if not success:
-                all_success = False
-        
-        end_to_end_latency = (
-            datetime.now(timezone.utc) - event_time
-        ).total_seconds()
-        END_TO_END_LATENCY.observe(end_to_end_latency)
-        logger.info(
-            "end_to_end_latency",
-            extra={
-                "service": "worker",
-                "request_id": request_id,
-                "event_id": event_id,
-                "latency": round(end_to_end_latency, 4),
-            }
-        )
-
-        event.status = "delivered" if all_success else "failed"
-        db.commit()
-    except Exception as e:
-        logger.error(
-            "event_processing_error",
-            extra={
-                "service": "worker",
-                "request_id": request_id,
-                "event_id": event_id,
-                "error": str(e),
-            }
-        )
-        if event:
-            event.status = "failed"
-            db.commit()
+        consume_loop(session_factory, r, shutdown, health.beater("consumer"))
     finally:
-        db.close()
+        shutdown.set()
+        for t in threads:
+            t.join(timeout=10)
+        server.shutdown()
+        r.close()
+        dispose_engine()
+        logger.warning("worker_shutdown_complete", extra={"service": "worker"})
 
-def deliver_event(db, event, webhook, request_id):
-    retry_count = 0
-    while True:
-        try:
-            logger.info(
-                "delivery_attempt",
-                extra={
-                    "service": "worker",
-                    "request_id": request_id,
-                    "event_id": event.id,
-                    "retry_count": retry_count,
-                }
-            )
-            start = time.time()
 
-            response = requests.post(
-                webhook.url,
-                json=event.payload,
-                timeout=5
-            )
+def main():
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+    run()
 
-            latency_ms = int((time.time() - start) * 1000)
-            latency_sec = latency_ms / 1000
-
-            success = response.status_code < 400
-
-            delivery = models.Delivery(
-                event_id=event.id,
-                webhook_id=webhook.id,
-                status="success" if success else "failed",
-                retries=retry_count,
-                response_code=response.status_code,
-                latency_ms=latency_ms
-            )
-
-            db.add(delivery)
-            db.commit()
-
-            logger.info(
-                "delivery_result",
-                extra={
-                    "service": "worker",
-                    "request_id": request_id,
-                    "event_id": event.id,
-                    "webhook_url": webhook.url,
-                    "status_code": response.status_code,
-                    "retry_count": retry_count,
-                    "latency": latency_ms,
-                }
-            )
-            if success:
-                DELIVERY_SUCCESS.inc()
-                DELIVERY_LATENCY.observe(latency_sec)
-                return True
-            
-            raise Exception(f"HTTP {response.status_code}")
-        except Exception as e:
-            DELIVERY_FAILURE.inc()
-            logger.error(
-                "delivery_error",
-                extra={
-                    "service": "worker",
-                    "request_id": request_id,
-                    "event_id": event.id,
-                    "webhook_url": webhook.url,
-                    "retry_count": retry_count,
-                    "error": str(e)
-                }
-            )
-            delivery = models.Delivery(
-                event_id=event.id,
-                webhook_id=webhook.id,
-                status="failed",
-                retries=retry_count,
-                response_code=None,
-                latency_ms=None,
-                error_message=str(e)
-            )
-            db.add(delivery)
-            db.commit()
-
-            if retry_count < MAX_RETRIES - 1:
-                RETRY_ATTEMPTS.inc()
-                delay = RETRY_DELAYS[retry_count]
-                logger.info(
-                    "scheduling_retry",
-                    extra={
-                        "service": "worker",
-                        "request_id": request_id,
-                        "event_id": event.id,
-                        "retry_count": retry_count + 1,
-                        "delay": delay
-                    }
-                )
-                time.sleep(delay)
-                retry_count += 1
-                continue
-            logger.critical(
-                "moved_to_dlq",
-                extra={
-                    "service": "worker",
-                    "event_id": event.id,
-                }
-            )
-            DLQ_EVENTS.inc()
-
-            try:
-                dlq_payload = {
-                    "event_id": event.id,
-                    "payload": event.payload,
-                    "event_type": event.event_type
-                }
-
-                redis_client.lpush(DLQ_NAME, json.dumps(dlq_payload))
-                logger.info(
-                    "dlq_push_success",
-                    extra={
-                        "service": "worker",
-                        "request_id": request_id,
-                        "event_id": event.id,
-                    }
-                )
-            except Exception as e:
-                logger.error(
-                    "dlq_push_error",
-                    extra={
-                        "service": "worker",
-                        "request_id": request_id,
-                        "event_id": event.id,
-                        "error": str(e)
-                    }
-                )
-
-            failed_delivery = models.Delivery(
-                event_id=event.id,
-                webhook_id=webhook.id,
-                status="dead_letter",
-                retries=MAX_RETRIES,
-                response_code=None,
-                latency_ms=None,
-                error_message=f"Moved to DLQ after {retry_count} attempts"
-            )
-            db.add(failed_delivery)
-            db.commit()
-            event.status = "dead_letter"
-
-            return False
-    
-signal.signal(signal.SIGTERM, handle_shutdown)
-signal.signal(signal.SIGINT, handle_shutdown)
 
 if __name__ == "__main__":
-    consume()
+    main()

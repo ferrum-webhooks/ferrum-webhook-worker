@@ -2,7 +2,7 @@ from prometheus_client import Counter, Histogram
 
 EVENTS_PROCESSED = Counter(
     "worker_events_processed_total",
-    "Total events processed"
+    "Total deliveries picked up from the stream"
 )
 
 DELIVERY_SUCCESS = Counter(
@@ -12,7 +12,7 @@ DELIVERY_SUCCESS = Counter(
 
 DELIVERY_FAILURE = Counter(
     "worker_delivery_failure_total",
-    "Failed deliveries"
+    "Failed delivery attempts"
 )
 
 DELIVERY_LATENCY = Histogram(
@@ -22,20 +22,35 @@ DELIVERY_LATENCY = Histogram(
 
 QUEUE_DELAY = Histogram(
     "worker_queue_delay_seconds",
-    "Time event spent waiting in queue"
+    "Time between event creation and the first delivery attempt"
 )
 
 END_TO_END_LATENCY = Histogram(
     "worker_end_to_end_latency_seconds",
-    "Total time from event creation to delivery"
+    "Total time from event creation to successful delivery"
 )
 
 RETRY_ATTEMPTS = Counter(
     "worker_retry_attempts_total",
-    "Total retry attempts"
+    "Retries scheduled"
 )
 
 DLQ_EVENTS = Counter(
     "worker_dlq_events_total",
-    "Events moved to dead letter queue"
+    "Deliveries moved to dead letter"
+)
+
+OUTBOX_PUBLISHED = Counter(
+    "worker_outbox_published_total",
+    "Outbox rows relayed to the stream"
+)
+
+STREAM_RECLAIMED = Counter(
+    "worker_stream_reclaimed_total",
+    "Stream messages reclaimed from crashed/stalled consumers (XAUTOCLAIM)"
+)
+
+DUPLICATES_SKIPPED = Counter(
+    "worker_duplicate_messages_skipped_total",
+    "Stream messages skipped because the delivery was already handled"
 )

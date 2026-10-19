@@ -28,3 +28,9 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+# Local env files (templates are .env.example)
+.env.*
+!.env.example
+
+# Test caches
+.pytest_cache/
